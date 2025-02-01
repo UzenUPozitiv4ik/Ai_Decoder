@@ -1,6 +1,6 @@
 Для работы приложения нужен python - https://www.python.org/downloads/
 Далее в консоли вводим
-1. python -m pip install PyQt
+1. python -m pip install PyQt5
 2. python -m pip install google.generativeai
 
 ////////////////////////////////////////////////////////////////////////////
