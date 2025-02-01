@@ -1,9 +1,10 @@
-import google.generativeai as genai
 import sys
 import os
 import string
 import re
 from collections import Counter
+
+import google.generativeai as genai
 from PyQt5.QtWidgets import (
     QApplication,
     QWidget,
@@ -14,12 +15,17 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QTextEdit,
     QMessageBox,
+    QGraphicsOpacityEffect,
 )
-from PyQt5.QtCore import Qt, QPropertyAnimation, QSize, QPoint, QThread, pyqtSignal
-from PyQt5.QtGui import QMovie
-from PyQt5.QtWidgets import QGraphicsOpacityEffect
+from PyQt5.QtCore import (
+    Qt,
+    QPropertyAnimation,
+    QPoint,
+    QThread,
+    pyqtSignal,
+)
+from PyQt5.QtGui import QMovie, QMouseEvent, QPainter, QColor, QBrush, QPen, QPainterPath
 
-# Частотные словари и алфавиты для английского и русского языков.
 eng_alphabet = string.ascii_uppercase
 eng_freq = {
     "A": 8.167,
@@ -259,7 +265,6 @@ def caesar_text(ciphertext):
     return results
 
 
-# Worker для вызова Gemini API в отдельном потоке.
 class ApiWorker(QThread):
     result_ready = pyqtSignal(str)
     error_occurred = pyqtSignal(str)
@@ -286,8 +291,6 @@ class ApiWorker(QThread):
             )
             chat_session = model.start_chat(history=[])
 
-            # Если последний символ не является знаком препинания,
-            # добавляем точку для стабильного результата.
             text = self.ciphertext
             if text and text[-1] not in ".!?":
                 text += "."
@@ -307,17 +310,101 @@ class ApiWorker(QThread):
             self.error_occurred.emit(str(e))
 
 
+class TitleBar(QWidget):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.parent = parent
+        self.setFixedHeight(35)
+        self.setObjectName("title_bar")
+        self.setAutoFillBackground(False)
+        self.bg_color = QColor("#2C2F38")
+        self.setStyleSheet("""
+            QWidget#title_bar {
+                background-color: #2C2F38;
+            }
+            QPushButton {
+                border: none;
+                background: transparent;
+                color: #B0B3B8;
+                font-size: 14px;
+            }
+            QPushButton:hover {
+                color: #E4E6E9;
+            }
+            QLabel {
+                color: #E4E6E9;
+                font-size: 14px;
+            }
+        """)
+
+        self.title = QLabel("AI DECODER", self)
+        self.title.setAlignment(Qt.AlignCenter)
+
+        self.minimize_button = QPushButton("─", self)
+        self.minimize_button.setFixedSize(20, 20)
+        self.minimize_button.clicked.connect(self.minimize_window)
+
+        self.close_button = QPushButton("💀", self)
+        self.close_button.setFixedSize(20, 20)
+        self.close_button.clicked.connect(self.close_window)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.title.setGeometry(0, 0, self.width(), self.height())
+        margin = 10
+        self.close_button.move(
+            self.width() - margin - self.close_button.width(),
+            (self.height() - self.close_button.height()) // 2,
+        )
+        self.minimize_button.move(
+            self.close_button.x() - margin - self.minimize_button.width(),
+            (self.height() - self.minimize_button.height()) // 2,
+        )
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = self.rect()
+        path = QPainterPath()
+        radius = 15
+        path.moveTo(rect.left(), rect.bottom())
+        path.lineTo(rect.left(), rect.top() + radius)
+        path.quadTo(rect.left(), rect.top(), rect.left() + radius, rect.top())
+        path.lineTo(rect.right() - radius, rect.top())
+        path.quadTo(rect.right(), rect.top(), rect.right(), rect.top() + radius)
+        path.lineTo(rect.right(), rect.bottom())
+        path.lineTo(rect.left(), rect.bottom())
+        painter.fillPath(path, self.bg_color)
+
+    def minimize_window(self):
+        self.parent.showMinimized()
+
+    def close_window(self):
+        self.parent.close()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.start = event.globalPos()
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() == Qt.LeftButton:
+            diff = event.globalPos() - self.start
+            self.parent.move(self.parent.pos() + diff)
+            self.start = event.globalPos()
+
+
 class CryptoAnalyzerApp(QWidget):
     def __init__(self):
         super().__init__()
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setWindowFlags(Qt.FramelessWindowHint)
+        self.resize(700, 500)
+        self.old_pos = self.pos()
 
-        self.setWindowTitle("Дешифратор")
-        self.setGeometry(200, 200, 700, 500)
-        self.setStyleSheet(
-            """
-            QWidget {
+        self.setStyleSheet("""
+            QWidget#content_widget {
                 background-color: #2C2F38;
-                color: #E4E6E9;
+                border-radius: 15px;
             }
             QLabel {
                 font-size: 14px;
@@ -333,7 +420,7 @@ class CryptoAnalyzerApp(QWidget):
             QLineEdit:focus {
                 border: 1px solid #A6A9B3;
             }
-            QPushButton {
+            QPushButton#processButton {
                 background-color: #5A6A76;
                 border: 1px solid #6F7C88;
                 color: white;
@@ -342,7 +429,7 @@ class CryptoAnalyzerApp(QWidget):
                 border-radius: 5px;
                 margin-top: 10px;
             }
-            QPushButton:hover {
+            QPushButton#processButton:hover {
                 background-color: #6F7C88;
             }
             QTextEdit {
@@ -352,43 +439,50 @@ class CryptoAnalyzerApp(QWidget):
                 padding: 10px;
                 font-size: 14px;
             }
-            """
-        )
+        """)
 
-        layout = QVBoxLayout()
+        self.layout = QVBoxLayout(self)
+        self.layout.setContentsMargins(0, 0, 0, 0)
+
+        self.title_bar = TitleBar(self)
+        self.layout.addWidget(self.title_bar)
+
+        self.content_widget = QWidget(self)
+        self.content_widget.setObjectName("content_widget")
+        content_layout = QVBoxLayout(self.content_widget)
+        content_layout.setContentsMargins(10, 10, 10, 10)
 
         api_layout = QHBoxLayout()
-        self.api_key_label = QLabel("API Key:")
+        self.api_key_label = QLabel("API Key :")
         self.api_key_entry = QLineEdit()
         self.api_key_entry.setEchoMode(QLineEdit.Password)
         api_layout.addWidget(self.api_key_label)
         api_layout.addWidget(self.api_key_entry)
 
         input_layout = QHBoxLayout()
-        self.ciphertext_label = QLabel("Введите шифр:")
+        self.ciphertext_label = QLabel("Шифр :  ")
         self.ciphertext_input = QLineEdit()
         input_layout.addWidget(self.ciphertext_label)
         input_layout.addWidget(self.ciphertext_input)
 
-        self.process_button = QPushButton("Расшифровать 🕵")
+        self.process_button = QPushButton("Расшифровать 🕵", self)
+        self.process_button.setObjectName("processButton")
         self.process_button.clicked.connect(self.process_text)
 
         self.result_text = QTextEdit()
         self.result_text.setReadOnly(True)
 
-        layout.addLayout(api_layout)
-        layout.addLayout(input_layout)
-        layout.addWidget(self.process_button)
-        layout.addWidget(self.result_text)
+        content_layout.addLayout(api_layout)
+        content_layout.addLayout(input_layout)
+        content_layout.addWidget(self.process_button)
+        content_layout.addWidget(self.result_text)
+        self.layout.addWidget(self.content_widget)
 
-        self.setLayout(layout)
-
-        # Настройка отображения GIF.
         self.gif_label = QLabel(self)
         self.gif_label.setAlignment(Qt.AlignCenter)
         self.gif_label.setFixedSize(500, 500)
         self.gif_label.setAttribute(Qt.WA_TranslucentBackground)
-        self.gif_label.setStyleSheet("background:transparent;")
+        self.gif_label.setStyleSheet("background: transparent;")
         self.gif_label.hide()
 
         self.gif_effect = QGraphicsOpacityEffect(self.gif_label)
@@ -397,8 +491,17 @@ class CryptoAnalyzerApp(QWidget):
 
         self.api_worker = None
 
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = self.rect()
+        brush = QBrush(QColor("#2C2F38"))
+        painter.setBrush(brush)
+        painter.setPen(Qt.NoPen)
+        painter.drawRoundedRect(rect, 15, 15)
+
     def start_gif(self):
-        gif_path = r"C:\Users\ilnar\Documents\Python_projects\emoji.gif"
+        gif_path = os.path.dirname(os.path.abspath(__file__))+"/emoji1.gif"
         if os.path.exists(gif_path):
             self.movie = QMovie(gif_path)
             self.movie.loopCount = 1
@@ -406,23 +509,21 @@ class CryptoAnalyzerApp(QWidget):
             self.movie.start()
             self.movie.frameChanged.connect(self.check_movie_finished)
         else:
-            self.gif_label.setText("GIF not found.")
+            self.gif_label.setText("Гифка не находится в нужной директории")
         self.fade_in_gif(duration=300)
         center_point = self.rect().center()
         gif_size = self.gif_label.size()
         new_pos = QPoint(
             center_point.x() - gif_size.width() // 2,
-            center_point.y() - gif_size.height() // 2,
+            int(center_point.y() - gif_size.height() // 2.5),
         )
         self.gif_label.move(new_pos)
         self.gif_label.raise_()
         self.gif_label.show()
 
     def check_movie_finished(self, frame):
-        if (
-            self.movie.loopCount != -1
-            and self.movie.currentFrameNumber() == self.movie.frameCount() - 1
-        ):
+        if (self.movie.loopCount != -1 and
+            self.movie.currentFrameNumber() == self.movie.frameCount() - 1):
             self.fade_out_gif(duration=300)
 
     def fade_in_gif(self, duration=300):
@@ -441,29 +542,30 @@ class CryptoAnalyzerApp(QWidget):
         self.anim.finished.connect(self.gif_label.hide)
 
     def process_text(self):
+        self.api_key_entry.setFocusPolicy(Qt.NoFocus)
+        self.ciphertext_input.setFocusPolicy(Qt.NoFocus)
         api_key = self.api_key_entry.text().strip()
         if not api_key:
-            self.show_error("API Error", "Please enter your API key.")
+            self.show_error("API Error", "Api key неверный")
             return
 
         ciphertext = self.ciphertext_input.text().strip()
         if not ciphertext:
             self.show_error(
-                "Ciphertext Error", "Please enter the ciphertext to process."
+                "Ciphertext Error", "Шифр не был введен"
             )
             return
 
         self.start_gif()
         self.result_text.setText("Загрузка...")
 
-        # Отключаем кнопку, чтобы избежать повторного нажатия
         self.process_button.setEnabled(False)
-
-        # Запуск фонового потока с API запросом
         self.api_worker = ApiWorker(api_key, ciphertext)
         self.api_worker.result_ready.connect(self.on_result_ready)
         self.api_worker.error_occurred.connect(self.on_error)
         self.api_worker.start()
+        self.api_key_entry.clearFocus()
+        self.ciphertext_input.clearFocus()
 
     def on_result_ready(self, result):
         self.result_text.setText(result)
@@ -474,11 +576,19 @@ class CryptoAnalyzerApp(QWidget):
         self.process_button.setEnabled(True)
 
     def show_error(self, title, message):
-        msg = QMessageBox()
+        msg = QMessageBox(self)
         msg.setIcon(QMessageBox.Critical)
         msg.setWindowTitle(title)
         msg.setText(message)
         msg.exec_()
+
+    def mousePressEvent(self, event):
+        self.old_pos = event.globalPos()
+
+    def mouseMoveEvent(self, event):
+        delta = QPoint(event.globalPos() - self.old_pos)
+        self.move(self.x() + delta.x(), self.y() + delta.y())
+        self.old_pos = event.globalPos()
 
 
 if __name__ == "__main__":
