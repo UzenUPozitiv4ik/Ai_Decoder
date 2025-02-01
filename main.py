@@ -1,6 +1,9 @@
 import google.generativeai as genai
 import sys
 import os
+import string
+import re
+from collections import Counter
 from PyQt5.QtWidgets import (
     QApplication,
     QWidget,
@@ -12,13 +15,11 @@ from PyQt5.QtWidgets import (
     QTextEdit,
     QMessageBox,
 )
-from PyQt5.QtCore import Qt, QPropertyAnimation, QSize, QPoint
+from PyQt5.QtCore import Qt, QPropertyAnimation, QSize, QPoint, QThread, pyqtSignal
 from PyQt5.QtGui import QMovie
 from PyQt5.QtWidgets import QGraphicsOpacityEffect
-import string
-import re
-from collections import Counter
 
+# Частотные словари и алфавиты для английского и русского языков.
 eng_alphabet = string.ascii_uppercase
 eng_freq = {
     "A": 8.167,
@@ -258,13 +259,60 @@ def caesar_text(ciphertext):
     return results
 
 
+# Worker для вызова Gemini API в отдельном потоке.
+class ApiWorker(QThread):
+    result_ready = pyqtSignal(str)
+    error_occurred = pyqtSignal(str)
+
+    def __init__(self, api_key, ciphertext):
+        super().__init__()
+        self.api_key = api_key
+        self.ciphertext = ciphertext
+
+    def run(self):
+        try:
+            generation_config = {
+                "temperature": 1,
+                "top_p": 0.95,
+                "top_k": 40,
+                "max_output_tokens": 8192,
+                "response_mime_type": "text/plain",
+            }
+
+            genai.configure(api_key=self.api_key)
+            model = genai.GenerativeModel(
+                model_name="gemini-2.0-flash-exp",
+                generation_config=generation_config,
+            )
+            chat_session = model.start_chat(history=[])
+
+            # Если последний символ не является знаком препинания,
+            # добавляем точку для стабильного результата.
+            text = self.ciphertext
+            if text and text[-1] not in ".!?":
+                text += "."
+
+            vigenere_result = vigenere_text(text)
+            atbash_result = atbash_text(text)
+            caesar_results = "\n".join(caesar_text(text))
+
+            prompt = (
+                "Есть ли среди следующих текстов читаемый для человека? Если да, то "
+                "выведи его и ничего больше:\n"
+                f"{vigenere_result}\n{atbash_result}\n{caesar_results}"
+            )
+            response = chat_session.send_message(prompt)
+            self.result_ready.emit(response.text)
+        except Exception as e:
+            self.error_occurred.emit(str(e))
+
+
 class CryptoAnalyzerApp(QWidget):
     def __init__(self):
         super().__init__()
 
-        self.setWindowTitle("Crypto Analyzer")
+        self.setWindowTitle("Дешифратор")
         self.setGeometry(200, 200, 700, 500)
-
         self.setStyleSheet(
             """
             QWidget {
@@ -317,12 +365,12 @@ class CryptoAnalyzerApp(QWidget):
         api_layout.addWidget(self.api_key_entry)
 
         input_layout = QHBoxLayout()
-        self.ciphertext_label = QLabel("Ciphertext:")
+        self.ciphertext_label = QLabel("Введите шифр:")
         self.ciphertext_input = QLineEdit()
         input_layout.addWidget(self.ciphertext_label)
         input_layout.addWidget(self.ciphertext_input)
 
-        self.process_button = QPushButton("Decrypt 🕵")
+        self.process_button = QPushButton("Расшифровать 🕵")
         self.process_button.clicked.connect(self.process_text)
 
         self.result_text = QTextEdit()
@@ -335,6 +383,7 @@ class CryptoAnalyzerApp(QWidget):
 
         self.setLayout(layout)
 
+        # Настройка отображения GIF.
         self.gif_label = QLabel(self)
         self.gif_label.setAlignment(Qt.AlignCenter)
         self.gif_label.setFixedSize(500, 500)
@@ -345,6 +394,8 @@ class CryptoAnalyzerApp(QWidget):
         self.gif_effect = QGraphicsOpacityEffect(self.gif_label)
         self.gif_label.setGraphicsEffect(self.gif_effect)
         self.gif_effect.setOpacity(0)
+
+        self.api_worker = None
 
     def start_gif(self):
         gif_path = r"C:\Users\ilnar\Documents\Python_projects\emoji.gif"
@@ -369,7 +420,7 @@ class CryptoAnalyzerApp(QWidget):
 
     def check_movie_finished(self, frame):
         if (
-            self.movie.loopCount != -1  
+            self.movie.loopCount != -1
             and self.movie.currentFrameNumber() == self.movie.frameCount() - 1
         ):
             self.fade_out_gif(duration=300)
@@ -390,12 +441,12 @@ class CryptoAnalyzerApp(QWidget):
         self.anim.finished.connect(self.gif_label.hide)
 
     def process_text(self):
-        api_key = self.api_key_entry.text()
+        api_key = self.api_key_entry.text().strip()
         if not api_key:
             self.show_error("API Error", "Please enter your API key.")
             return
 
-        ciphertext = self.ciphertext_input.text()
+        ciphertext = self.ciphertext_input.text().strip()
         if not ciphertext:
             self.show_error(
                 "Ciphertext Error", "Please enter the ciphertext to process."
@@ -403,37 +454,24 @@ class CryptoAnalyzerApp(QWidget):
             return
 
         self.start_gif()
+        self.result_text.setText("Загрузка...")
 
-        try:
-            generation_config = {
-                "temperature": 1,
-                "top_p": 0.95,
-                "top_k": 40,
-                "max_output_tokens": 8192,
-                "response_mime_type": "text/plain",
-            }
+        # Отключаем кнопку, чтобы избежать повторного нажатия
+        self.process_button.setEnabled(False)
 
-            genai.configure(api_key=api_key)
-            model = genai.GenerativeModel(
-                model_name="gemini-2.0-flash-exp",
-                generation_config=generation_config,
-            )
-            chat_session = model.start_chat(history=[])
+        # Запуск фонового потока с API запросом
+        self.api_worker = ApiWorker(api_key, ciphertext)
+        self.api_worker.result_ready.connect(self.on_result_ready)
+        self.api_worker.error_occurred.connect(self.on_error)
+        self.api_worker.start()
 
-            if ciphertext[-1] not in ".!?":
-                ciphertext += "."
+    def on_result_ready(self, result):
+        self.result_text.setText(result)
+        self.process_button.setEnabled(True)
 
-            vigenere_result = vigenere_text(ciphertext)
-            atbash_result = atbash_text(ciphertext)
-            caesar_results = "\n".join(caesar_text(ciphertext))
-            response = chat_session.send_message(
-                "Есть ли среди следующих текстов читаемый для человека? Если да, то "
-                "выведи его и ничего больше:"
-                f"{vigenere_result}\n{atbash_result}\n{caesar_results}"
-            )
-            self.result_text.setText(response.text)
-        except Exception as e:
-            self.show_error("API Error", f"An error occurred: {str(e)}")
+    def on_error(self, error_msg):
+        self.show_error("API Error", f"An error occurred: {error_msg}")
+        self.process_button.setEnabled(True)
 
     def show_error(self, title, message):
         msg = QMessageBox()
