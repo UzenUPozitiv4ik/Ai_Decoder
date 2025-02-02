@@ -564,8 +564,8 @@ class CryptoAnalyzerApp(QWidget):
         self.api_worker.result_ready.connect(self.on_result_ready)
         self.api_worker.error_occurred.connect(self.on_error)
         self.api_worker.start()
-        self.api_key_entry.clearFocus()
-        self.ciphertext_input.clearFocus()
+        self.api_key_entry.setFocusPolicy(Qt.ClickFocus)
+        self.ciphertext_input.setFocusPolicy(Qt.ClickFocus)
 
     def on_result_ready(self, result):
         self.result_text.setText(result)
